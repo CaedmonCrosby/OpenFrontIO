@@ -1,7 +1,7 @@
 import { vi } from "vitest";
 import { ConstructionExecution } from "../src/core/execution/ConstructionExecution";
 import { NationStructureBehavior } from "../src/core/execution/nation/NationStructureBehavior";
-import { Difficulty, PlayerType } from "../src/core/game/Game";
+import { Difficulty, PlayerType, UnitType } from "../src/core/game/Game";
 import { Cluster } from "../src/core/game/TrainStation";
 import { PseudoRandom } from "../src/core/PseudoRandom";
 
@@ -899,3 +899,134 @@ describe("NationStructureBehavior.getOrBuildReachableStations", () => {
     expect(buildSpy).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("NationStructureBehavior.independentNeedScore", () => {
+  function makeNeedGame(
+    opts: {
+      disabled?: UnitType[];
+      maxTroops?: number;
+      players?: any[];
+    } = {},
+  ): any {
+    return {
+      config: () => ({
+        isUnitDisabled: (t: UnitType) => opts.disabled?.includes(t) ?? false,
+        maxTroops: () => opts.maxTroops ?? 100_000,
+        trainGold: (rel: string) => TRAIN_GOLD[rel] ?? 0n,
+        samRange: () => 70,
+        unitInfo: () => ({ upgradable: true }),
+      }),
+      players: () => opts.players ?? [],
+      railNetwork: () => ({
+        stationManager: () => ({ getAll: () => new Set() }),
+      }),
+    };
+  }
+
+  function makeNeedPlayer(
+    opts: {
+      owned?: Partial<Record<UnitType, number>>;
+      troops?: number;
+      tiles?: number;
+      units?: UnitType[];
+    } = {},
+  ): any {
+    const allUnits = (opts.units ?? []).map((type) => ({
+      type: () => type,
+      tile: () => 0,
+      level: () => 1,
+    }));
+    return {
+      unitsOwned: (t: UnitType) => opts.owned?.[t] ?? 0,
+      units: (...types: UnitType[]) =>
+        types.length === 0
+          ? allUnits
+          : allUnits.filter((u) => types.includes(u.type())),
+      troops: () => opts.troops ?? 0,
+      numTilesOwned: () => opts.tiles ?? 1000,
+      isFriendly: () => false,
+    };
+  }
+
+  it("scores a first city as the top opener", () => {
+    const behavior = makeBehavior(
+      makeNeedGame(),
+      makeNeedPlayer({ owned: { [UnitType.City]: 0 } }),
+    );
+    const city = (behavior as any).independentNeedScore(
+      UnitType.City,
+      0,
+      false,
+      true,
+    );
+    const factory = (behavior as any).independentNeedScore(
+      UnitType.Factory,
+      0,
+      false,
+      true,
+    );
+    expect(city).toBeGreaterThan(factory);
+    expect(city).toBe(100);
+  });
+
+  it("raises city score when troops are near the cap", () => {
+    const behavior = makeBehavior(
+      makeNeedGame({ maxTroops: 100_000 }),
+      makeNeedPlayer({
+        owned: { [UnitType.City]: 2 },
+        troops: 92_000,
+        tiles: 2000,
+      }),
+    );
+    expect(
+      (behavior as any).independentNeedScore(UnitType.City, 2, false, true),
+    ).toBe(86);
+  });
+
+  it("scores a first factory highly once a city exists, independently of ports", () => {
+    const behavior = makeBehavior(
+      makeNeedGame(),
+      makeNeedPlayer({
+        owned: { [UnitType.City]: 1, [UnitType.Factory]: 0, [UnitType.Port]: 0 },
+      }),
+    );
+    expect(
+      (behavior as any).independentNeedScore(UnitType.Factory, 1, false, true),
+    ).toBe(88);
+  });
+
+  it("does not score ports when landlocked", () => {
+    const behavior = makeBehavior(makeNeedGame(), makeNeedPlayer());
+    expect(
+      (behavior as any).independentNeedScore(UnitType.Port, 1, false, true),
+    ).toBe(0);
+  });
+
+  it("scores SAM independently when valuables exist", () => {
+    const behavior = makeBehavior(
+      makeNeedGame(),
+      makeNeedPlayer({
+        owned: { [UnitType.SAMLauncher]: 0 },
+        units: [UnitType.City, UnitType.Factory],
+      }),
+    );
+    expect(
+      (behavior as any).independentNeedScore(
+        UnitType.SAMLauncher,
+        2,
+        false,
+        true,
+      ),
+    ).toBe(72);
+  });
+
+  it("prefers stacking a factory that already exists", () => {
+    const behavior = makeBehavior(
+      makeNeedGame(),
+      makeNeedPlayer({ owned: { [UnitType.Factory]: 1 } }),
+    );
+    expect((behavior as any).shouldPreferStack(UnitType.Factory, 1)).toBe(true);
+    expect((behavior as any).shouldPreferStack(UnitType.City, 0)).toBe(false);
+  });
+});
+

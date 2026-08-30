@@ -38,14 +38,17 @@ export class NationWarshipBehavior {
     if (this.game.config().isUnitDisabled(UnitType.Warship)) {
       return false;
     }
-    if (!this.random.chance(50)) {
+    // Proactive warships are kept rare: they are expensive and usually
+    // less useful than economy. Retaliation/infestation paths are separate.
+    if (!this.random.chance(90)) {
       return false;
     }
     const ports = this.player.units(UnitType.Port);
     const ships = this.player.units(UnitType.Warship);
+    const maxProactiveWarships = 2;
     if (
       ports.length > 0 &&
-      ships.length === 0 &&
+      ships.length < maxProactiveWarships &&
       this.player.gold() > this.cost(UnitType.Warship)
     ) {
       const port = this.random.randElement(ports);
@@ -66,6 +69,7 @@ export class NationWarshipBehavior {
   }
 
   private warshipSpawnTile(portTile: TileRef, radius: number): TileRef | null {
+    let fallback: TileRef | null = null;
     for (let attempts = 0; attempts < 50; attempts++) {
       const randX = this.random.nextInt(
         this.game.x(portTile) - radius,
@@ -79,13 +83,16 @@ export class NationWarshipBehavior {
         continue;
       }
       const tile = this.game.ref(randX, randY);
-      // Sanity check
       if (!this.game.isWater(tile)) {
         continue;
       }
-      return tile;
+      // Ocean tiles can intercept trade; tiny lakes cannot.
+      if (this.game.isOcean(tile)) {
+        return tile;
+      }
+      fallback ??= tile;
     }
-    return null;
+    return fallback;
   }
 
   trackShipsAndRetaliate(): void {

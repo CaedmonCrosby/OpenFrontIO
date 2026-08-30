@@ -10,6 +10,16 @@
 
 This is a fork/rewrite of WarFront.io. Credit to https://github.com/WarFrontIO.
 
+## This fork (CaedmonCrosby)
+
+Based on [OpenFrontIO](https://github.com/openfrontio/OpenFrontIO). Your nation auto-builds **City**, **Factory**, **Port**, and **SAM Launcher** independently (each type is placed when and where it actually helps, including stacking/upgrading a strong existing site). **Warships** spawn rarely.
+
+Play it as a **Windows app** (its own window, not a browser tab): double-click **OpenFront** on your Desktop, or `desktop-app\OpenFront.exe`. Singleplayer does not need the internet. Friends on your LAN can still join via `Play-OpenFront-LAN.bat` / `npm run dev:host`.
+
+```
+desktop-app\OpenFront.exe
+```
+
 ![CI](https://github.com/openfrontio/OpenFrontIO/actions/workflows/ci.yml/badge.svg)
 [![Crowdin](https://badges.crowdin.net/openfront-mls/localized.svg)](https://crowdin.com/project/openfront-mls)
 [![CLA assistant](https://cla-assistant.io/readme/badge/openfrontio/OpenFrontIO)](https://cla-assistant.io/openfrontio/OpenFrontIO)

@@ -148,6 +148,8 @@ export class NationStructureBehavior {
     private random: PseudoRandom,
     private game: Game,
     private player: Player,
+    /** Human auto-build: same placement brain, real costs, no defense-post panic. */
+    private readonly forHumanPlayer = false,
   ) {}
 
   handleStructures(): boolean {
@@ -155,6 +157,7 @@ export class NationStructureBehavior {
     // they don't increment placementsCount or lastStructureTick, and they
     // are never built as the very first structure.
     if (
+      !this.forHumanPlayer &&
       this.placementsCount > 0 &&
       !this.game.config().isUnitDisabled(UnitType.DefensePost)
     ) {
@@ -411,6 +414,9 @@ export class NationStructureBehavior {
   // Spreads placements after the save-up target is first reached:
   // 15s ON / 15s OFF, alternating, to allow NationNukeBehavior to spend the gold.
   private isInPostSaveUpBlockedPhase(): boolean {
+    if (this.forHumanPlayer) {
+      return false;
+    }
     if (this.game.config().isUnitDisabled(UnitType.MissileSilo)) {
       return false;
     }
@@ -479,55 +485,31 @@ export class NationStructureBehavior {
       }
     }
 
-    // Build order for non-city structures (priority order)
-    const buildOrder: UnitType[] = [
+    // Each type is scored on its own merits (city / factory / port / SAM),
+    // then we build or stack the highest-need type we can actually place.
+    const candidates: { type: UnitType; score: number }[] = [
+      UnitType.City,
       UnitType.Port,
       UnitType.Factory,
       UnitType.SAMLauncher,
       UnitType.MissileSilo,
-    ];
+    ].map((type) => ({
+      type,
+      score: this.independentNeedScore(
+        type,
+        cityCount,
+        hasCoastalTiles,
+        missileSilosEnabled,
+      ),
+    }));
 
-    const nukesEnabled =
-      !config.isUnitDisabled(UnitType.AtomBomb) ||
-      !config.isUnitDisabled(UnitType.HydrogenBomb) ||
-      !config.isUnitDisabled(UnitType.MIRV);
+    candidates.sort((a, b) => b.score - a.score);
 
-    for (const structureType of buildOrder) {
-      // Skip disabled structure types
-      if (config.isUnitDisabled(structureType)) {
-        continue;
+    for (const { type, score } of candidates) {
+      if (score <= 0) continue;
+      if (this.maybeSpawnStructure(type)) {
+        return true;
       }
-
-      // Skip ports if no coastal tiles
-      if (structureType === UnitType.Port && !hasCoastalTiles) {
-        continue;
-      }
-
-      // Skip missile silos and SAM launchers if all nukes are disabled
-      if (
-        !nukesEnabled &&
-        (structureType === UnitType.MissileSilo ||
-          structureType === UnitType.SAMLauncher)
-      ) {
-        continue;
-      }
-
-      // Skip SAM launchers if missile silos are disabled
-      if (!missileSilosEnabled && structureType === UnitType.SAMLauncher) {
-        continue;
-      }
-
-      if (
-        this.shouldBuildStructure(structureType, cityCount, hasCoastalTiles)
-      ) {
-        if (this.maybeSpawnStructure(structureType)) {
-          return true;
-        }
-      }
-    }
-
-    if (!citiesDisabled && this.maybeSpawnStructure(UnitType.City)) {
-      return true;
     }
 
     return false;
@@ -603,9 +585,31 @@ export class NationStructureBehavior {
     if (this.player.gold() < perceivedCost) {
       return false;
     }
+    if (
+      this.forHumanPlayer &&
+      this.player.unitsOwned(type) > 0 &&
+      this.player.gold() < perceivedCost + this.humanGoldReserve()
+    ) {
+      return false;
+    }
 
-    // Check if we should upgrade instead of building new
     const structures = this.player.units(type);
+    const stackTarget = this.findBestStackTarget(type, structures);
+    const newTile = this.structureSpawnTile(type);
+    const preferStack = this.shouldPreferStack(type, structures.length);
+
+    if (
+      stackTarget !== null &&
+      this.player.canUpgradeUnit(stackTarget) &&
+      (preferStack || newTile === null)
+    ) {
+      game.addExecution(
+        new UpgradeStructureExecution(this.player, stackTarget.id()),
+      );
+      return true;
+    }
+
+    // Density too high: upgrade an existing structure rather than crowding the map.
     if (
       this.getTotalStructureDensity() > UPGRADE_DENSITY_THRESHOLD &&
       game.config().unitInfo(type).upgradable
@@ -613,24 +617,227 @@ export class NationStructureBehavior {
       if (this.maybeUpgradeStructure(structures)) {
         return true;
       }
-      // Density too high but couldn't upgrade (e.g. all under construction) — don't build new, wait for construction (most relevant for SAMs)
       if (structures.length > 0) {
         return false;
       }
-      // No structures of this type exist yet — fall through to build the first one
-      // (even if density is high - the nation is probably on a tiny island and we need to use all building spots we can find)
     }
 
-    const tile = this.structureSpawnTile(type);
-    if (tile === null) {
+    if (newTile === null) {
       return false;
     }
-    const canBuild = this.player.canBuild(type, tile);
+    const canBuild = this.player.canBuild(type, newTile);
     if (canBuild === false) {
       return false;
     }
-    game.addExecution(new ConstructionExecution(this.player, type, tile));
+    game.addExecution(new ConstructionExecution(this.player, type, newTile));
     return true;
+  }
+
+  /** Keep a manual-spend buffer so auto-build does not empty the player's bank. */
+  private humanGoldReserve(): Gold {
+    return 250_000n;
+  }
+
+  /**
+   * Independent need score: each structure type is judged on its own, not as a
+   * leftover after an earlier quota in a fixed build order.
+   */
+  private independentNeedScore(
+    type: UnitType,
+    cityCount: number,
+    hasCoastalTiles: boolean,
+    missileSilosEnabled: boolean,
+  ): number {
+    const config = this.game.config();
+    if (config.isUnitDisabled(type)) {
+      return 0;
+    }
+
+    const nukesEnabled =
+      !config.isUnitDisabled(UnitType.AtomBomb) ||
+      !config.isUnitDisabled(UnitType.HydrogenBomb) ||
+      !config.isUnitDisabled(UnitType.MIRV);
+
+    switch (type) {
+      case UnitType.City: {
+        const cities = this.player.unitsOwned(UnitType.City);
+        if (cities === 0) return 100;
+        const max = config.maxTroops(this.player);
+        const fill = max > 0 ? this.player.troops() / max : 0;
+        let score = 12;
+        if (fill >= 0.9) score = 86;
+        else if (fill >= 0.75) score = 58;
+        else if (fill >= 0.6) score = 32;
+        const expected = Math.max(
+          1,
+          Math.floor(this.player.numTilesOwned() / 2500),
+        );
+        if (cities < expected) score = Math.max(score, 42);
+        return score;
+      }
+      case UnitType.Port: {
+        if (!hasCoastalTiles) return 0;
+        const ports = this.player.unitsOwned(UnitType.Port);
+        if (ports === 0) return 92;
+        const target = Math.max(1, Math.floor(cityCount * 0.5));
+        if (ports < target) return 48;
+        return 18;
+      }
+      case UnitType.Factory: {
+        const factories = this.player.unitsOwned(UnitType.Factory);
+        const tradeNodes =
+          this.player.unitsOwned(UnitType.City) +
+          this.player.unitsOwned(UnitType.Port);
+        if (tradeNodes === 0) return 8;
+        if (factories === 0) return 88;
+        const ratio = hasCoastalTiles ? 0.35 : 0.75;
+        const target = Math.max(1, Math.floor(cityCount * ratio));
+        if (factories < target) return 50;
+        return 22;
+      }
+      case UnitType.SAMLauncher: {
+        if (!nukesEnabled || !missileSilosEnabled) return 0;
+        const valuables = this.protectableStructures();
+        if (valuables.length === 0) return 0;
+        const sams = this.player.units(UnitType.SAMLauncher);
+        const uncovered = this.countUncoveredValuables(valuables, sams);
+        let score = 0;
+        if (sams.length === 0 && valuables.length >= 2) score = 72;
+        else if (sams.length === 0) score = 38;
+        if (uncovered > 0) score = Math.max(score, 36 + uncovered * 10);
+        if (this.enemyHasSilos()) score = Math.max(score, 68);
+        if (sams.length > 0 && uncovered === 0) score = Math.max(score, 24);
+        return score;
+      }
+      case UnitType.MissileSilo: {
+        if (!nukesEnabled) return 0;
+        return this.shouldBuildStructure(
+          type,
+          cityCount,
+          hasCoastalTiles,
+        )
+          ? 34
+          : 0;
+      }
+      default:
+        return 0;
+    }
+  }
+
+  private protectableStructures(): Unit[] {
+    const result: Unit[] = [];
+    for (const unit of this.player.units()) {
+      switch (unit.type()) {
+        case UnitType.City:
+        case UnitType.Factory:
+        case UnitType.MissileSilo:
+        case UnitType.Port:
+          result.push(unit);
+      }
+    }
+    return result;
+  }
+
+  private countUncoveredValuables(valuables: Unit[], sams: Unit[]): number {
+    if (sams.length === 0) return valuables.length;
+    const game = this.game;
+    let uncovered = 0;
+    for (const structure of valuables) {
+      const covered = sams.some((sam) => {
+        const range = game.config().samRange(sam.level());
+        return (
+          game.euclideanDistSquared(structure.tile(), sam.tile()) <=
+          range * range
+        );
+      });
+      if (!covered) uncovered++;
+    }
+    return uncovered;
+  }
+
+  private enemyHasSilos(): boolean {
+    for (const other of this.game.players()) {
+      if (other === this.player) continue;
+      if (this.player.isFriendly(other)) continue;
+      if (other.unitsOwned(UnitType.MissileSilo) > 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Stacking (upgrading the existing structure on its tile) is preferred when
+   * another copy nearby would not earn its keep: extra city levels raise troop
+   * cap without creating a wasted same-tile train stop; extra factory/port/SAM
+   * levels strengthen a good site instead of scattering.
+   */
+  private shouldPreferStack(type: UnitType, owned: number): boolean {
+    if (owned === 0) return false;
+    if (!this.game.config().unitInfo(type).upgradable) return false;
+    switch (type) {
+      case UnitType.City: {
+        const max = this.game.config().maxTroops(this.player);
+        const fill = max > 0 ? this.player.troops() / max : 0;
+        // New cities extend the rail chain; stack when we only need troop cap.
+        return fill >= 0.85 && owned >= 2;
+      }
+      case UnitType.Factory:
+        return owned >= 1;
+      case UnitType.Port:
+        return owned >= 1;
+      case UnitType.SAMLauncher: {
+        const valuables = this.protectableStructures();
+        const sams = this.player.units(UnitType.SAMLauncher);
+        return this.countUncoveredValuables(valuables, sams) === 0;
+      }
+      default:
+        return false;
+    }
+  }
+
+  private findBestStackTarget(type: UnitType, structures: Unit[]): Unit | null {
+    const upgradable = structures.filter((s) => this.player.canUpgradeUnit(s));
+    if (upgradable.length === 0) return null;
+
+    if (type === UnitType.SAMLauncher) {
+      const game = this.game;
+      const valuables = this.protectableStructures();
+      let best: Unit | null = null;
+      let bestCover = -1;
+      for (const sam of upgradable) {
+        const range = game.config().samRange(sam.level());
+        const rangeSq = range * range;
+        let cover = 0;
+        for (const structure of valuables) {
+          if (
+            game.euclideanDistSquared(structure.tile(), sam.tile()) <= rangeSq
+          ) {
+            cover += structure.level();
+          }
+        }
+        if (cover > bestCover) {
+          bestCover = cover;
+          best = sam;
+        }
+      }
+      return best ?? upgradable[0];
+    }
+
+    if (type === UnitType.City || type === UnitType.Factory) {
+      const borderTiles = this.player.borderTiles();
+      const game = this.game;
+      let best: Unit | null = null;
+      let bestDist = -1;
+      for (const unit of upgradable) {
+        const [, dist] = closestTile(game, borderTiles, unit.tile());
+        if (dist > bestDist) {
+          bestDist = dist;
+          best = unit;
+        }
+      }
+      return best ?? upgradable[0];
+    }
+
+    return upgradable[0];
   }
 
   /**
@@ -641,6 +848,9 @@ export class NationStructureBehavior {
    */
   private getPerceivedCost(type: UnitType): Gold {
     const realCost = this.cost(type);
+    if (this.forHumanPlayer) {
+      return realCost;
+    }
 
     const saveUpTarget = this.getSaveUpTarget();
     if (saveUpTarget === 0n || this.player.gold() >= saveUpTarget) {
