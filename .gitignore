@@ -31,3 +31,4 @@ map-generator/map-generator.exe
 .openfront-app-profile/
 desktop-app/*.exe
 desktop-app/*.pdb
+desktop-app/*.log
