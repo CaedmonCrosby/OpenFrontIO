@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -8,8 +9,9 @@ using System.Windows.Forms;
 
 internal static class Program
 {
-    private const int Port = 9000;
-    private const string AppUrl = "http://localhost:9000";
+    private const int ClientPort = 9000;
+    private const string AppUrl = "http://127.0.0.1:9000";
+    private const string MutexName = "Local\\OpenFront.Caedmon.App";
 
     [STAThread]
     private static void Main()
@@ -17,14 +19,25 @@ internal static class Program
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
+        bool created;
+        var mutex = new Mutex(true, MutexName, out created);
+        if (!created)
+        {
+            OpenGameWindow();
+            return;
+        }
+
         var root = FindRepoRoot();
         if (root == null)
         {
-            MessageBox.Show(
-                "Could not find the OpenFront folder (package.json).",
-                "OpenFront",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+            MessageBox.Show("OpenFront files were not found.", "OpenFront", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        var nodeDir = FindNodeDir();
+        if (nodeDir == null)
+        {
+            MessageBox.Show("Node.js was not found. Install it from https://nodejs.org/", "OpenFront", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
@@ -32,118 +45,107 @@ internal static class Program
         splash.Show();
         Application.DoEvents();
 
+        Process vite = null;
+        Process server = null;
         try
         {
-            var nodeDir = FindNodeDir();
-            if (nodeDir == null)
-            {
-                splash.Close();
-                MessageBox.Show(
-                    "Node.js was not found. Install it from https://nodejs.org/ then try again.",
-                    "OpenFront",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-                return;
-            }
+            FreeListenPorts(new[] { 9000, 3000, 3001, 3002 });
+            Thread.Sleep(400);
 
-            var logPath = Path.Combine(root, "desktop-app", "launch.log");
-            Process server = null;
-
-            if (PortIsOpen(Port))
+            if (!Directory.Exists(Path.Combine(root, "node_modules")))
             {
-                SetSplash(splash, "Game server already running…");
-            }
-            else
-            {
-                if (!Directory.Exists(Path.Combine(root, "node_modules")))
+                SetSplash(splash, "Installing (first launch only)…");
+                var inst = StartNode(nodeDir, "\"" + Path.Combine(nodeDir, "node_modules", "npm", "bin", "npm-cli.js") + "\" run inst", root, null);
+                inst.WaitForExit();
+                if (inst.ExitCode != 0)
                 {
-                    SetSplash(splash, "Installing game files (first launch only)…");
-                    var inst = StartNpm(nodeDir, "run inst", root, logPath);
-                    inst.WaitForExit();
-                    if (inst.ExitCode != 0)
-                    {
-                        splash.Close();
-                        MessageBox.Show(
-                            "Installing dependencies failed. See desktop-app\\launch.log",
-                            "OpenFront",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Error);
-                        return;
-                    }
-                }
-
-                SetSplash(splash, "Launching game server (usually ~5 seconds)…");
-                server = StartNpm(nodeDir, "run dev", root, logPath);
-
-                if (!WaitForPort(Port, TimeSpan.FromSeconds(90), splash, server))
-                {
-                    KillTree(server);
                     splash.Close();
-                    MessageBox.Show(
-                        "The game server did not start.\n\nLast log:\n" + TailLog(logPath, 20),
-                        "OpenFront",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error);
+                    MessageBox.Show("Could not install OpenFront. Check your internet connection and try again.", "OpenFront", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
             }
 
-            var edge = FindEdge();
-            if (edge == null)
+            SetSplash(splash, "Starting…");
+            var nodeExe = Path.Combine(nodeDir, "node.exe");
+            var viteJs = Path.Combine(root, "node_modules", "vite", "bin", "vite.js");
+            var tsxJs = Path.Combine(root, "node_modules", "tsx", "dist", "cli.mjs");
+
+            vite = StartNode(
+                nodeDir,
+                "\"" + viteJs + "\" --port 9000 --strictPort --host 127.0.0.1",
+                root,
+                DevEnv(true));
+            server = StartNode(
+                nodeDir,
+                "\"" + tsxJs + "\" src/server/Server.ts",
+                root,
+                DevEnv(false));
+
+            if (!WaitForPort("127.0.0.1", ClientPort, TimeSpan.FromSeconds(45), splash, vite))
             {
+                KillTree(vite);
                 KillTree(server);
                 splash.Close();
-                MessageBox.Show(
-                    "Microsoft Edge was not found. It is required for the OpenFront window.",
-                    "OpenFront",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                MessageBox.Show("OpenFront could not start. Close other copies and try again.", "OpenFront", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
-            var profile = Path.Combine(root, ".openfront-app-profile");
-            Directory.CreateDirectory(profile);
-            SetSplash(splash, "Opening OpenFront…");
-
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = edge,
-                Arguments = "--app=" + AppUrl
-                    + " --user-data-dir=\"" + profile + "\""
-                    + " --window-size=1440,900"
-                    + " --disable-features=Translate,MediaRouter",
-                UseShellExecute = false,
-            });
-
+            SetSplash(splash, "Opening…");
+            OpenGameWindow();
             splash.Close();
 
-            var ctl = new Form
-            {
-                Text = "OpenFront",
-                Width = 420,
-                Height = 140,
-                FormBorderStyle = FormBorderStyle.FixedDialog,
-                StartPosition = FormStartPosition.CenterScreen,
-                MaximizeBox = false,
-                BackColor = Color.FromArgb(11, 15, 20),
-                ForeColor = Color.White,
-            };
-            ctl.Controls.Add(new Label
-            {
-                Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleCenter,
-                Font = new Font("Segoe UI", 11f),
-                ForeColor = Color.White,
-                Text = "OpenFront is running.\nClose this window to stop the game.",
-            });
+            var ctl = MakeControlWindow();
             Application.Run(ctl);
-            KillTree(server);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             try { splash.Close(); } catch { }
-            MessageBox.Show(ex.Message, "OpenFront", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show("OpenFront could not start.", "OpenFront", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+        finally
+        {
+            KillTree(vite);
+            KillTree(server);
+            try { mutex.ReleaseMutex(); } catch { }
+            mutex.Close();
+        }
+    }
+
+    private static Dictionary<string, string> DevEnv(bool forVite)
+    {
+        var env = new Dictionary<string, string>();
+        env["SKIP_BROWSER_OPEN"] = "true";
+        env["GAME_ENV"] = "dev";
+        env["DOMAIN"] = "localhost";
+        env["GIT_COMMIT"] = "DEV";
+        env["NUM_WORKERS"] = "1";
+        env["TURNSTILE_SITE_KEY"] = "1x00000000000000000000AA";
+        env["API_KEY"] = "WARNING_DEV_API_KEY_DO_NOT_USE_IN_PRODUCTION";
+        env["ADMIN_BOT_API_KEY"] = "WARNING_DEV_ADMIN_BOT_KEY_DO_NOT_USE_IN_PRODUCTION";
+        if (forVite) env["VITE_HOST"] = "";
+        return env;
+    }
+
+    private static void OpenGameWindow()
+    {
+        var edge = FindEdge();
+        if (edge == null)
+        {
+            MessageBox.Show("Microsoft Edge is required for OpenFront.", "OpenFront", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        var root = FindRepoRoot() ?? AppDomain.CurrentDomain.BaseDirectory;
+        var profile = Path.Combine(root, ".openfront-app-profile");
+        Directory.CreateDirectory(profile);
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = edge,
+            Arguments = "--app=" + AppUrl
+                + " --user-data-dir=\"" + profile + "\""
+                + " --window-size=1440,900"
+                + " --disable-features=Translate,MediaRouter",
+            UseShellExecute = false,
+        });
     }
 
     private static Form MakeSplash(string text)
@@ -151,8 +153,8 @@ internal static class Program
         var form = new Form
         {
             Text = "OpenFront",
-            Width = 460,
-            Height = 150,
+            Width = 360,
+            Height = 130,
             FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterScreen,
             ControlBox = false,
@@ -161,7 +163,7 @@ internal static class Program
             BackColor = Color.FromArgb(11, 15, 20),
             ForeColor = Color.White,
         };
-        var label = new Label
+        form.Controls.Add(new Label
         {
             Name = "status",
             Dock = DockStyle.Fill,
@@ -169,8 +171,31 @@ internal static class Program
             Font = new Font("Segoe UI", 12f),
             ForeColor = Color.White,
             Text = text,
+        });
+        return form;
+    }
+
+    private static Form MakeControlWindow()
+    {
+        var form = new Form
+        {
+            Text = "OpenFront",
+            Width = 380,
+            Height = 130,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterScreen,
+            MaximizeBox = false,
+            BackColor = Color.FromArgb(11, 15, 20),
+            ForeColor = Color.White,
         };
-        form.Controls.Add(label);
+        form.Controls.Add(new Label
+        {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 11f),
+            ForeColor = Color.White,
+            Text = "OpenFront is running.\nClose this window to quit.",
+        });
         return form;
     }
 
@@ -253,14 +278,12 @@ internal static class Program
         }
     }
 
-    private static Process StartNpm(string nodeDir, string npmArgs, string workDir, string logPath)
+    private static Process StartNode(string nodeDir, string args, string workDir, Dictionary<string, string> extraEnv)
     {
-        var nodeExe = Path.Combine(nodeDir, "node.exe");
-        var npmCli = Path.Combine(nodeDir, "node_modules", "npm", "bin", "npm-cli.js");
         var psi = new ProcessStartInfo
         {
-            FileName = nodeExe,
-            Arguments = "\"" + npmCli + "\" " + npmArgs,
+            FileName = Path.Combine(nodeDir, "node.exe"),
+            Arguments = args,
             WorkingDirectory = workDir,
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -271,76 +294,103 @@ internal static class Program
         psi.EnvironmentVariables["PATH"] = nodeDir + ";"
             + Path.Combine(workDir, "node_modules", ".bin") + ";"
             + path;
-        psi.EnvironmentVariables["SKIP_BROWSER_OPEN"] = "true";
-        psi.EnvironmentVariables["GAME_ENV"] = "dev";
-
-        try { File.WriteAllText(logPath, "Starting: " + nodeExe + " " + psi.Arguments + "\r\n"); }
-        catch { }
-
-        var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        DataReceivedEventHandler write = delegate(object sender, DataReceivedEventArgs e)
+        if (extraEnv != null)
         {
-            if (e.Data == null) return;
-            try { File.AppendAllText(logPath, e.Data + "\r\n"); } catch { }
-        };
-        p.OutputDataReceived += write;
-        p.ErrorDataReceived += write;
+            foreach (var kv in extraEnv) psi.EnvironmentVariables[kv.Key] = kv.Value;
+        }
+        var p = new Process { StartInfo = psi };
+        p.OutputDataReceived += delegate { };
+        p.ErrorDataReceived += delegate { };
         p.Start();
         p.BeginOutputReadLine();
         p.BeginErrorReadLine();
         return p;
     }
 
-    private static bool PortIsOpen(int port)
-    {
-        // Vite binds "localhost", which on Windows is often IPv6 (::1) only.
-        foreach (var host in new[] { "localhost", "127.0.0.1", "::1" })
-        {
-            try
-            {
-                using (var client = new TcpClient())
-                {
-                    var ar = client.BeginConnect(host, port, null, null);
-                    if (ar.AsyncWaitHandle.WaitOne(400) && client.Connected)
-                    {
-                        return true;
-                    }
-                }
-            }
-            catch { }
-        }
-        return false;
-    }
-
-    private static bool WaitForPort(int port, TimeSpan timeout, Form splash, Process server)
+    private static bool WaitForPort(string host, int port, TimeSpan timeout, Form splash, Process child)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
-            if (server != null && server.HasExited) return false;
-            if (PortIsOpen(port)) return true;
+            if (child != null && child.HasExited) return false;
+            if (PortIsOpen(host, port)) return true;
             Application.DoEvents();
-            Thread.Sleep(300);
+            Thread.Sleep(250);
         }
         return false;
     }
 
-    private static string TailLog(string logPath, int lines)
+    private static bool PortIsOpen(string host, int port)
     {
         try
         {
-            if (!File.Exists(logPath)) return "(no log)";
-            var all = File.ReadAllLines(logPath);
-            var start = Math.Max(0, all.Length - lines);
-            var sb = new System.Text.StringBuilder();
-            for (var i = start; i < all.Length; i++) sb.AppendLine(all[i]);
-            var text = sb.ToString().Trim();
-            if (text.Length > 1200) text = text.Substring(text.Length - 1200);
-            return text;
+            using (var client = new TcpClient())
+            {
+                var ar = client.BeginConnect(host, port, null, null);
+                return ar.AsyncWaitHandle.WaitOne(300) && client.Connected;
+            }
         }
         catch
         {
-            return "(could not read log)";
+            return false;
+        }
+    }
+
+    private static void FreeListenPorts(int[] ports)
+    {
+        var pids = new Dictionary<int, bool>();
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "netstat",
+                Arguments = "-ano",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true,
+            };
+            var p = Process.Start(psi);
+            if (p == null) return;
+            var output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(5000);
+            using (var reader = new StringReader(output))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    if (line.IndexOf("LISTENING") < 0) continue;
+                    for (var i = 0; i < ports.Length; i++)
+                    {
+                        if (line.IndexOf(":" + ports[i] + " ") < 0 && line.IndexOf(":" + ports[i] + "\t") < 0) continue;
+                        var parts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length == 0) continue;
+                        int pid;
+                        if (int.TryParse(parts[parts.Length - 1], out pid) && pid > 0)
+                        {
+                            pids[pid] = true;
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
+
+        var self = Process.GetCurrentProcess().Id;
+        foreach (var pid in pids.Keys)
+        {
+            if (pid == self) continue;
+            try
+            {
+                var killer = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "taskkill",
+                    Arguments = "/F /PID " + pid + " /T",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                });
+                if (killer != null) killer.WaitForExit(3000);
+            }
+            catch { }
         }
     }
 
