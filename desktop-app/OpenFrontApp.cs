@@ -111,7 +111,10 @@ internal static class Program
     {
         var edge = FindEdge();
         var root = FindRepoRoot() ?? AppDomain.CurrentDomain.BaseDirectory;
-        var profile = Path.Combine(root, ".openfront-app-profile");
+        var profile = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "OpenFront",
+            "edge-profile");
         Directory.CreateDirectory(profile);
         if (edge != null)
         {

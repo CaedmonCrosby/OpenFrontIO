@@ -331,6 +331,12 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 9000,
       host: process.env.VITE_HOST === "lan",
+      watch: {
+        ignored: [
+          "**/.openfront-app-profile/**",
+          "**/desktop-app/**",
+        ],
+      },
       // Automatically open the browser when the server starts
       open: process.env.SKIP_BROWSER_OPEN !== "true",
       proxy: {
