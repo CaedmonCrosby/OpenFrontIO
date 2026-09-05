@@ -6,32 +6,58 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
 
 internal static class Program
 {
-    private const string AppUrl = "http://127.0.0.1:9000/";
-    private const string MutexName = "Local\\OpenFront.Caedmon.App";
-
     [STAThread]
     private static void Main()
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
+        Application.Run(new MainForm());
+    }
+}
 
-        bool created;
-        var mutex = new Mutex(true, MutexName, out created);
-        if (!created)
+internal class MainForm : Form
+{
+    private readonly Label status;
+    private readonly WebView2 web;
+    private Process vite;
+    private Process server;
+
+    public MainForm()
+    {
+        Text = "OpenFront";
+        Width = 1440;
+        Height = 900;
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor = Color.FromArgb(11, 15, 20);
+        MinimumSize = new Size(800, 600);
+
+        status = new Label
         {
-            OpenGameWindow();
-            return;
-        }
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 14f),
+            ForeColor = Color.White,
+            Text = "Starting OpenFront…",
+        };
+        web = new WebView2
+        {
+            Dock = DockStyle.Fill,
+            Visible = false,
+        };
+        Controls.Add(web);
+        Controls.Add(status);
 
-        var splash = MakeSplash("Starting OpenFront…");
-        splash.Show();
-        Application.DoEvents();
+        Shown += OnShown;
+        FormClosed += OnFormClosed;
+    }
 
-        Process vite = null;
-        Process server = null;
+    private void OnShown(object sender, EventArgs e)
+    {
         try
         {
             if (!HttpOk())
@@ -40,12 +66,9 @@ internal static class Program
                 var nodeDir = FindNodeDir();
                 if (root == null || nodeDir == null)
                 {
-                    splash.Close();
-                    MessageBox.Show("OpenFront could not find Node.js or its files.", "OpenFront", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    status.Text = "Could not find Node.js or the OpenFront files.";
                     return;
                 }
-
-                SetSplash(splash, "Starting…");
                 var nodeExe = Path.Combine(nodeDir, "node.exe");
                 vite = StartNode(nodeExe, nodeDir, root,
                     "\"" + Path.Combine(root, "node_modules", "vite", "bin", "vite.js") + "\" --port 9000 --strictPort --host 127.0.0.1",
@@ -53,35 +76,55 @@ internal static class Program
                 server = StartNode(nodeExe, nodeDir, root,
                     "\"" + Path.Combine(root, "node_modules", "tsx", "dist", "cli.mjs") + "\" src/server/Server.ts",
                     false);
-
-                if (!WaitForHttp(TimeSpan.FromSeconds(60), splash))
+                var deadline = DateTime.UtcNow.AddSeconds(60);
+                while (DateTime.UtcNow < deadline && !HttpOk())
                 {
-                    splash.Close();
-                    MessageBox.Show("OpenFront could not start. Try again in a moment.", "OpenFront", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    KillTree(vite);
-                    KillTree(server);
+                    Application.DoEvents();
+                    Thread.Sleep(300);
+                }
+                if (!HttpOk())
+                {
+                    status.Text = "OpenFront could not start.";
                     return;
                 }
             }
 
-            SetSplash(splash, "Opening…");
-            OpenGameWindow();
-            splash.Close();
+            status.Text = "Opening…";
+            var dataDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "OpenFront",
+                "webview2");
+            Directory.CreateDirectory(dataDir);
+            Environment.SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", dataDir);
 
-            Application.Run(MakeQuitWindow());
+            web.CoreWebView2InitializationCompleted += OnWebViewReady;
+            web.EnsureCoreWebView2Async();
         }
-        catch
+        catch (Exception ex)
         {
-            try { splash.Close(); } catch { }
-            MessageBox.Show("OpenFront could not start.", "OpenFront", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            status.Text = "OpenFront could not start.";
+            Debug.WriteLine(ex.ToString());
         }
-        finally
+    }
+
+    private void OnWebViewReady(object sender, CoreWebView2InitializationCompletedEventArgs e)
+    {
+        if (!e.IsSuccess)
         {
-            KillTree(vite);
-            KillTree(server);
-            try { mutex.ReleaseMutex(); } catch { }
-            mutex.Close();
+            status.Text = "The game window could not be created.";
+            return;
         }
+        web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
+        web.CoreWebView2.Settings.IsStatusBarEnabled = false;
+        web.CoreWebView2.Navigate("http://127.0.0.1:9000/");
+        web.Visible = true;
+        status.Visible = false;
+    }
+
+    private void OnFormClosed(object sender, FormClosedEventArgs e)
+    {
+        KillTree(vite);
+        KillTree(server);
     }
 
     private static Process StartNode(string nodeExe, string nodeDir, string root, string args, bool vite)
@@ -105,45 +148,6 @@ internal static class Program
         psi.EnvironmentVariables["API_KEY"] = "WARNING_DEV_API_KEY_DO_NOT_USE_IN_PRODUCTION";
         psi.EnvironmentVariables["ADMIN_BOT_API_KEY"] = "WARNING_DEV_ADMIN_BOT_KEY_DO_NOT_USE_IN_PRODUCTION";
         return Process.Start(psi);
-    }
-
-    private static void OpenGameWindow()
-    {
-        var edge = FindEdge();
-        var root = FindRepoRoot() ?? AppDomain.CurrentDomain.BaseDirectory;
-        var profile = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "OpenFront",
-            "edge-profile");
-        Directory.CreateDirectory(profile);
-        if (edge != null)
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = edge,
-                Arguments = "--app=http://127.0.0.1:9000"
-                    + " --user-data-dir=\"" + profile + "\""
-                    + " --window-size=1440,900"
-                    + " --proxy-server=direct://"
-                    + " --proxy-bypass-list=127.0.0.1;localhost;*"
-                    + " --disable-features=Translate,MediaRouter",
-                UseShellExecute = false,
-            });
-            return;
-        }
-        Process.Start(new ProcessStartInfo { FileName = AppUrl, UseShellExecute = true });
-    }
-
-    private static bool WaitForHttp(TimeSpan timeout, Form splash)
-    {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (HttpOk()) return true;
-            Application.DoEvents();
-            Thread.Sleep(300);
-        }
-        return false;
     }
 
     private static bool HttpOk()
@@ -174,62 +178,6 @@ internal static class Program
         }
     }
 
-    private static Form MakeSplash(string text)
-    {
-        var form = new Form
-        {
-            Text = "OpenFront",
-            Width = 360,
-            Height = 130,
-            FormBorderStyle = FormBorderStyle.FixedDialog,
-            StartPosition = FormStartPosition.CenterScreen,
-            ControlBox = false,
-            MaximizeBox = false,
-            MinimizeBox = false,
-            BackColor = Color.FromArgb(11, 15, 20),
-        };
-        form.Controls.Add(new Label
-        {
-            Name = "status",
-            Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.MiddleCenter,
-            Font = new Font("Segoe UI", 12f),
-            ForeColor = Color.White,
-            Text = text,
-        });
-        return form;
-    }
-
-    private static Form MakeQuitWindow()
-    {
-        var form = new Form
-        {
-            Text = "OpenFront",
-            Width = 400,
-            Height = 140,
-            FormBorderStyle = FormBorderStyle.FixedDialog,
-            StartPosition = FormStartPosition.CenterScreen,
-            MaximizeBox = false,
-            BackColor = Color.FromArgb(11, 15, 20),
-        };
-        form.Controls.Add(new Label
-        {
-            Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.MiddleCenter,
-            Font = new Font("Segoe UI", 11f),
-            ForeColor = Color.White,
-            Text = "OpenFront is running.\nKeep this window open while you play.\nClose it to quit.",
-        });
-        return form;
-    }
-
-    private static void SetSplash(Form splash, string text)
-    {
-        var label = splash.Controls["status"] as Label;
-        if (label != null) label.Text = text;
-        Application.DoEvents();
-    }
-
     private static string FindRepoRoot()
     {
         var dir = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
@@ -253,36 +201,6 @@ internal static class Program
         })
         {
             if (File.Exists(Path.Combine(dir, "node.exe"))) return dir;
-        }
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "where.exe",
-                Arguments = "node.exe",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                CreateNoWindow = true,
-            };
-            var p = Process.Start(psi);
-            var line = p.StandardOutput.ReadLine();
-            p.WaitForExit();
-            if (!string.IsNullOrEmpty(line) && File.Exists(line.Trim()))
-                return Path.GetDirectoryName(line.Trim());
-        }
-        catch { }
-        return null;
-    }
-
-    private static string FindEdge()
-    {
-        foreach (var candidate in new[]
-        {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), @"Microsoft\Edge\Application\msedge.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"Microsoft\Edge\Application\msedge.exe"),
-        })
-        {
-            if (File.Exists(candidate)) return candidate;
         }
         return null;
     }

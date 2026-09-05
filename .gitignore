@@ -32,3 +32,4 @@ map-generator/map-generator.exe
 desktop-app/*.exe
 desktop-app/*.pdb
 desktop-app/*.log
+desktop-app/webview2/
