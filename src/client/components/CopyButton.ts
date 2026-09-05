@@ -63,7 +63,19 @@ export class CopyButton extends LitElement {
   }
 
   private async buildCopyUrl(): Promise<string> {
-    let url = `${window.location.origin}/${ClientEnv.workerPath(this.lobbyId)}/game/${this.lobbyId}`;
+    let origin =
+      (window as Window & { __OPENFRONT_SHARE_ORIGIN__?: string })
+        .__OPENFRONT_SHARE_ORIGIN__ || window.location.origin;
+    try {
+      const res = await fetch("/share-origin.json", { cache: "no-store" });
+      if (res.ok) {
+        const data = (await res.json()) as { origin?: string };
+        if (data.origin) origin = data.origin.replace(/\/$/, "");
+      }
+    } catch {
+      // Local-only until a public tunnel writes share-origin.json.
+    }
+    let url = `${origin}/${ClientEnv.workerPath(this.lobbyId)}/game/${this.lobbyId}`;
     if (this.includeLobbyQuery) {
       url += `?lobby&s=${encodeURIComponent(this.lobbySuffix)}`;
     }

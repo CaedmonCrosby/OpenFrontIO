@@ -330,7 +330,9 @@ export default defineConfig(({ mode }) => {
 
     server: {
       port: 9000,
-      host: process.env.VITE_HOST === "lan",
+      host: process.env.VITE_HOST === "lan" || process.env.VITE_BIND === "all",
+      allowedHosts: true,
+      hmr: process.env.VITE_DISABLE_HMR === "true" ? false : undefined,
       watch: {
         ignored: [
           "**/.openfront-app-profile/**",

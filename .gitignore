@@ -33,3 +33,6 @@ desktop-app/*.exe
 desktop-app/*.pdb
 desktop-app/*.log
 desktop-app/webview2/
+desktop-app/cloudflared.exe
+desktop-app/tunnel.log
+resources/share-origin.json
